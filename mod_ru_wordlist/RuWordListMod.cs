@@ -86,6 +86,11 @@ namespace RuWordList
         // 跨词书启动守卫
         private static bool _crossBookGuardDone;
         private static bool _disabledCleanupDone;
+        // 其它受管语言词书正在激活时暂缓还原 (跨插件写序竞争守卫)。
+        // 根因: 切到另一本受管词书的瞬间, 对方插件可能已经重建了共享队列;
+        // 本插件随后的切书还原会把旧基线盖回去, 再触发 FightList 时
+        // 游戏用全局已学词典补池, 队列里就混入其它语言的词。
+        private static bool _deferredRestoreLogged;
 
         // 换行
         private static readonly string NL = ((char)10).ToString();
@@ -264,6 +269,7 @@ namespace RuWordList
         private static void Pre()
         {
             if (!IsEnabled()) return;
+            DeferredRestoreCheck();
             try { CrossBookGuard(); }
             catch (Exception e) { Warn("跨词书守卫异常: " + e.Message); }
             try { Enforce(); }
@@ -273,6 +279,7 @@ namespace RuWordList
         private static void Post()
         {
             if (!IsEnabled()) return;
+            DeferredRestoreCheck();
             try { CrossBookGuard(); }
             catch (Exception e) { Warn("跨词书守卫异常: " + e.Message); }
             try { Enforce(); }
@@ -310,6 +317,11 @@ namespace RuWordList
                 {
                     Enforce();
                 }
+                else if (OtherRestoreDeferred())
+                {
+                    // 对方受管词书已激活: 此时把我们的旧基线写回去只会
+                    // 覆盖对方刚建好的队列。轮询会在窗口关闭后继续还原。
+                }
                 else
                 {
                     RestoreSharedFields();
@@ -331,14 +343,13 @@ namespace RuWordList
             _disabledCleanupDone = false;
             if (Time.unscaledTime < _nextPoll) return;
             _nextPoll = Time.unscaledTime + 1f;
+            DeferredRestoreCheck();
             try { CrossBookGuard(); }
             catch (Exception e) { Warn("跨词书守卫异常: " + e.Message); }
             try { Enforce(); }
             catch (Exception e) { Warn("轮询异常: " + e.Message); }
             try { TickDbHeal(); }
             catch (Exception e) { Warn("离线自愈异常: " + e.Message); }
-            try { TickSharedDbSwitch(); }
-            catch (Exception e) { Warn("共享库切换调度异常: " + e.Message); }
         }
 
         // ---------------- 已学词测试的队列与题干 ----------------
@@ -767,9 +778,9 @@ namespace RuWordList
             if (cur == null || cur.Count == 0) return null;
             int state = BookState();
             if (state == 0) return null;
-            bool ru = (state == 1);
+            bool fr = (state == 1);
             List<string> book = MyParameters.ChosenBook_List;
-            HashSet<string> bookSet = ru ? new HashSet<string>(book) : null;
+            HashSet<string> bookSet = fr ? new HashSet<string>(book) : null;
 
             HashSet<string> seen = new HashSet<string>();
             List<string> keep = new List<string>();
@@ -778,7 +789,7 @@ namespace RuWordList
             {
                 string w = cur[i];
                 if (string.IsNullOrEmpty(w)) continue;
-                if (!Allowed(w, ru, bookSet)) { dropped++; continue; }
+                if (!Allowed(w, fr, bookSet)) { dropped++; continue; }
                 if (seen.Add(w)) keep.Add(w);
             }
             if (dropped == 0 && keep.Count == cur.Count) return null;
@@ -790,7 +801,7 @@ namespace RuWordList
                 if (target < minKeep) target = minKeep;
                 keep.Clear();
                 seen.Clear();
-                Rebuild(keep, seen, ru, bookSet, preferLearned, target);
+                Rebuild(keep, seen, fr, bookSet, preferLearned, target);
                 if (keep.Count < minKeep) return null;
             }
             return keep;
@@ -800,9 +811,9 @@ namespace RuWordList
         {
             int state = BookState();
             if (state == 0) return null;
-            bool ru = (state == 1);
+            bool fr = (state == 1);
             List<string> book = MyParameters.ChosenBook_List;
-            HashSet<string> bookSet = ru ? new HashSet<string>(book) : null;
+            HashSet<string> bookSet = fr ? new HashSet<string>(book) : null;
             List<string> dest = new List<string>();
             HashSet<string> seen = new HashSet<string>();
             if (cur != null)
@@ -810,13 +821,13 @@ namespace RuWordList
                 for (int i = 0; i < cur.Count; i++)
                 {
                     string w = cur[i];
-                    if (string.IsNullOrEmpty(w) || !Allowed(w, ru, bookSet)) continue;
+                    if (string.IsNullOrEmpty(w) || !Allowed(w, fr, bookSet)) continue;
                     if (seen.Add(w)) dest.Add(w);
                 }
             }
             if (target < minKeep) target = minKeep;
             if (dest.Count > target) target = dest.Count;
-            Rebuild(dest, seen, ru, bookSet, preferLearned, target);
+            Rebuild(dest, seen, fr, bookSet, preferLearned, target);
             if (dest.Count < minKeep) return null;
             return dest;
         }
@@ -845,14 +856,14 @@ namespace RuWordList
             return dest;
         }
 
-        private static void Rebuild(List<string> dest, HashSet<string> seen, bool ru, HashSet<string> bookSet, bool preferLearned, int target)
+        private static void Rebuild(List<string> dest, HashSet<string> seen, bool fr, HashSet<string> bookSet, bool preferLearned, int target)
         {
             List<string> book = MyParameters.ChosenBook_List;
-            if (ru && book != null)
+            if (fr && book != null)
             {
                 if (preferLearned)
                 {
-                    FillFromLearned(dest, seen, ru, bookSet, target);
+                    FillFromLearned(dest, seen, fr, bookSet, target);
                     FillFromList(dest, seen, book, target);
                 }
                 else
@@ -866,16 +877,16 @@ namespace RuWordList
                         if (seen.Add(w)) dest.Add(w);
                     }
                     FillFromList(dest, seen, book, target);
-                    FillFromLearned(dest, seen, ru, bookSet, target);
+                    FillFromLearned(dest, seen, fr, bookSet, target);
                 }
             }
             else
             {
-                FillFromLearned(dest, seen, ru, bookSet, target);
+                FillFromLearned(dest, seen, fr, bookSet, target);
             }
         }
 
-        private static void FillFromLearned(List<string> dest, HashSet<string> seen, bool ru, HashSet<string> bookSet, int target)
+        private static void FillFromLearned(List<string> dest, HashSet<string> seen, bool fr, HashSet<string> bookSet, int target)
         {
             Dictionary<string, WordInfo> learned = MyParameters.HaveLearnedDictionary;
             if (learned == null) return;
@@ -884,7 +895,7 @@ namespace RuWordList
             {
                 string w = kv.Key;
                 if (string.IsNullOrEmpty(w)) continue;
-                if (!Allowed(w, ru, bookSet)) continue;
+                if (!Allowed(w, fr, bookSet)) continue;
                 cand.Add(w);
             }
             OrderByTestSetting(cand, learned);
@@ -954,10 +965,10 @@ namespace RuWordList
             }
         }
 
-        private static bool Allowed(string w, bool ru, HashSet<string> bookSet)
+        private static bool Allowed(string w, bool fr, HashSet<string> bookSet)
         {
             if (string.IsNullOrEmpty(w)) return false;
-            return ru ? (bookSet != null && bookSet.Contains(w)) : true;
+            return fr ? (bookSet != null && bookSet.Contains(w)) : true;
         }
 
         internal static int BookState()
@@ -991,6 +1002,20 @@ namespace RuWordList
         private static string ProfileId(BookProfile profile)
         {
             return profile == null ? "<none>" : profile.Id;
+        }
+
+        // 共享数据库只有一个当前语言态。德语插件也会维护同一组
+        // wcpFullEng/wcpOnlyWord 文件；俄语插件不能在德语书激活时把它
+        // 抢回英语，否则两个插件会互相覆盖同形词释义和例句。
+        private static string CurrentManagedLanguage()
+        {
+            try
+            {
+                if (!BookReady()) return null;
+                BookProfile profile = ProfileOfCurrentList(MyParameters.ChosenBook_List);
+                return profile == null ? null : profile.Language;
+            }
+            catch (Exception) { return null; }
         }
 
         private static BookProfile ProfileOfCurrentList(List<string> list)
@@ -1358,6 +1383,67 @@ namespace RuWordList
             return 0;
         }
 
+        // 当前激活的词书是否属于其它受管语言 (指纹识别, 与具体槽位无关)。
+        // 判定失败一律返回 false -> 还原路径保持旧行为; 误判方向的代价
+        // 是多还原一次 (无害), 而不是漏盖对方的队列。
+        private static bool OtherManagedBookActive()
+        {
+            try
+            {
+                if (!BookReady()) return false;
+                string name = MyParameters.ChosenBook_Para;
+                if (string.IsNullOrEmpty(name)) return false;
+                List<string> book = MyParameters.ChosenBook_List;
+                if (book == null || book.Count < 5) return false;
+                BookProfile memoryProfile = BookProfiles.Match(book);
+                if (memoryProfile == null || memoryProfile.Language == BookProfiles.Russian)
+                    return false;
+                int idx = SelfBookIndexOf(name);
+                if (idx <= 0) return false;
+                BookProfile slotProfile = SlotProfile(idx);
+                return slotProfile != null && slotProfile.Id == memoryProfile.Id;
+            }
+            catch (Exception) { return false; }
+        }
+
+        private static bool OtherRestoreDeferred()
+        {
+            try
+            {
+                if (BookState() == 1) return false;
+                if (!OtherManagedBookActive()) return false;
+                if (!_deferredRestoreLogged)
+                {
+                    _deferredRestoreLogged = true;
+                    Warn("检测到其它受管词书激活, 还原推迟到其重建完成后");
+                }
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        // 其它受管词书离开时, 它自己的切书还原负责恢复游戏原状;
+        // 这里只需在窗口关闭后让被暂缓的还原自然重试。
+        private static void DeferredRestoreCheck()
+        {
+            try
+            {
+                if (!IsEnabled() || !BookReady()) return;
+                if (BookState() == 1) return;
+                if (OtherManagedBookActive())
+                {
+                    if (!_deferredRestoreLogged)
+                    {
+                        _deferredRestoreLogged = true;
+                        Warn("检测到其它受管词书激活, 暂缓共享队列还原");
+                    }
+                    return;
+                }
+                _deferredRestoreLogged = false;
+            }
+            catch (Exception) { }
+        }
+
         private static Dictionary<string, string> BookDict()
         {
             int idx = SelfBookIndexOf(MyParameters.ChosenBook_Para);
@@ -1528,16 +1614,30 @@ namespace RuWordList
             List<string> disk = LoadBaselineListFromDisk(key);
             if (disk != null && !BaselineBelongsToOwnedBook(disk))
             {
-                BaselineLists[key] = disk;
+                if (!BaselineFromOtherManagedBook(disk))
+                {
+                    BaselineLists[key] = disk;
+                    return;
+                }
+                // 基线属于其它受管词书 (上一本切换时被还原竞争盖进来的残留):
+                // 记为空。它是上一本书的内容, 不属于"接管前的游戏原样"。
+                BaselineLists[key] = new List<string>();
+                SaveBaselineToDisk(BakPrefix + key, BaselineLists[key]);
                 return;
             }
             FieldInfo f = typeof(MyParameters).GetField(key, BindingFlags.Public | BindingFlags.Static);
             List<string> cur = (f != null) ? f.GetValue(null) as List<string> : null;
             if (cur != null && !BaselineBelongsToOwnedBook(cur))
             {
-                List<string> clone = new List<string>(cur);
-                BaselineLists[key] = clone;
-                SaveBaselineToDisk(BakPrefix + key, clone);
+                if (!BaselineFromOtherManagedBook(cur))
+                {
+                    List<string> clone = new List<string>(cur);
+                    BaselineLists[key] = clone;
+                    SaveBaselineToDisk(BakPrefix + key, clone);
+                    return;
+                }
+                BaselineLists[key] = new List<string>();
+                SaveBaselineToDisk(BakPrefix + key, BaselineLists[key]);
             }
         }
 
@@ -1547,16 +1647,28 @@ namespace RuWordList
             string[] disk = LoadBaselineArrayFromDisk(key);
             if (disk != null && !BaselineBelongsToOwnedBook(disk))
             {
-                BaselineArrays[key] = disk;
+                if (!BaselineFromOtherManagedBook(disk))
+                {
+                    BaselineArrays[key] = disk;
+                    return;
+                }
+                BaselineArrays[key] = new string[0];
+                SaveBaselineToDisk(BakPrefix + key, BaselineArrays[key]);
                 return;
             }
             FieldInfo f = typeof(MyParameters).GetField(key, BindingFlags.Public | BindingFlags.Static);
             string[] cur = (f != null) ? f.GetValue(null) as string[] : null;
             if (cur != null && !BaselineBelongsToOwnedBook(cur))
             {
-                string[] clone = (string[])cur.Clone();
-                BaselineArrays[key] = clone;
-                SaveBaselineToDisk(BakPrefix + key, clone);
+                if (!BaselineFromOtherManagedBook(cur))
+                {
+                    string[] clone = (string[])cur.Clone();
+                    BaselineArrays[key] = clone;
+                    SaveBaselineToDisk(BakPrefix + key, clone);
+                    return;
+                }
+                BaselineArrays[key] = new string[0];
+                SaveBaselineToDisk(BakPrefix + key, BaselineArrays[key]);
             }
         }
 
@@ -1588,8 +1700,8 @@ namespace RuWordList
             int slot = LoadInt(OwnedSourceSlotKey, 0);
             if (slot <= 0) slot = SelfBookIndexOf(MyParameters.ChosenBook_Para);
             if (slot <= 0) return false;
-            // Membership must come from the owned Russian slot, never the newly
-            // selected English/Japanese/French dictionary during cross-book restoration.
+            // Membership must come from the owned French slot, never the newly
+            // selected English/Japanese dictionary during cross-book restoration.
             try
             {
                 string path = System.IO.Path.Combine(Application.persistentDataPath, "MyBook.es3");
@@ -1605,6 +1717,38 @@ namespace RuWordList
                     if (!owned.Contains(word)) return false;
                 }
                 return any;
+            }
+            catch (Exception) { return false; }
+        }
+
+        // 与 BaselineBelongsToOwnedBook 相反方向: 内容能否指纹命中**其它**受管语言。
+        // 命中 = 这是上一本受管词书的残留 (还原竞争盖进来的), 还原时必须当空处理,
+        // 绝不能在离开本书时把它恢复出去。识别不出 -> false, 保持保守旧行为。
+        private static bool BaselineFromOtherManagedBook(IEnumerable<string> words)
+        {
+            try
+            {
+                if (words == null) return false;
+                List<string> list = new List<string>(words);
+                if (list.Count == 0) return false;
+                if (BookProfiles.Match(list) != null) return false;   // 完整命中 = 自己
+                List<BookProfile> candidates = new List<BookProfile>();
+                for (int i = 0; i < BookProfiles.All.Length; i++)
+                {
+                    BookProfile p = BookProfiles.All[i];
+                    if (p.Language == BookProfiles.Russian) continue;
+                    candidates.Add(p);
+                }
+                string prefix = BookProfiles.FingerprintOf(list);
+                if (string.IsNullOrEmpty(prefix)) return false;
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    string fp = candidates[i].Fingerprint;
+                    if (!string.IsNullOrEmpty(fp) && fp.Length >= prefix.Length &&
+                        fp.StartsWith(prefix, StringComparison.Ordinal))
+                        return true;
+                }
+                return false;
             }
             catch (Exception) { return false; }
         }
@@ -1702,6 +1846,7 @@ namespace RuWordList
 
         private static bool RestoreSharedFields()
         {
+            if (OtherRestoreDeferred()) return false;   // 竞争守卫
             bool acted;
             bool clearedAny = RestoreQueues(out acted);
             if (!acted) return false;
@@ -1737,6 +1882,11 @@ namespace RuWordList
                     RestoreList(key, new List<string>());
                     clearedAny = true;
                 }
+                else if (BaselineFromOtherManagedBook(value))
+                {
+                    RestoreList(key, new List<string>());
+                    clearedAny = true;
+                }
                 else RestoreList(key, value);
             }
 
@@ -1750,6 +1900,11 @@ namespace RuWordList
                 if (!BaselineArrays.TryGetValue(key, out value) || value == null)
                     value = LoadBaselineArrayFromDisk(key);
                 if (value == null || BaselineBelongsToOwnedBook(value))
+                {
+                    RestoreArray(key, new string[0]);
+                    clearedAny = true;
+                }
+                else if (BaselineFromOtherManagedBook(value))
                 {
                     RestoreArray(key, new string[0]);
                     clearedAny = true;
@@ -1805,6 +1960,12 @@ namespace RuWordList
             List<string> ownedBools = LoadStringList(OwnedBoolKey);
             if (ownedLists.Count == 0 && ownedArrs.Count == 0 && ownedBools.Count == 0) return;
 
+            if (OtherRestoreDeferred())
+            {
+                _crossBookGuardDone = false;   // 下轮 Pre/Post/轮询再试
+                return;
+            }
+
             bool ended = RestoreSharedFields();
             Warn("跨词书守卫: 已还原插件接管前的测试队列" +
                  (ended ? " (残留俄语队列改为清空并结束本轮测试)" : ""));
@@ -1820,7 +1981,14 @@ namespace RuWordList
                 List<string> ownedArrs = LoadStringList(OwnedArrayKey);
                 List<string> ownedBools = LoadStringList(OwnedBoolKey);
                 if (ownedLists.Count > 0 || ownedArrs.Count > 0 || ownedBools.Count > 0)
+                {
+                    if (OtherRestoreDeferred())
+                    {
+                        _disabledCleanupDone = false;   // 窗口关闭后重试
+                        return;
+                    }
                     RestoreSharedFields();
+                }
                 _disabledCleanupDone = true;
             }
             catch (Exception e)
@@ -1941,14 +2109,7 @@ namespace RuWordList
             try
             {
                 System.Threading.Thread t = new System.Threading.Thread(
-                    new System.Threading.ThreadStart(delegate
-                    {
-                        lock (DbWriteLock)
-                        {
-                            try { RunDbHeal(pack, full, only); }
-                            finally { if (_dbLang != 1) _dbLang = 0; }
-                        }
-                    }));
+                    new System.Threading.ThreadStart(delegate { RunDbHeal(pack, full, only); }));
                 t.IsBackground = true;
                 t.Start();
             }
@@ -1962,7 +2123,6 @@ namespace RuWordList
                 if (!NeedsDbHeal(full))
                 {
                     InfoOnce("dbheal-skip", "例句库已是补丁状态, 不再重灌");
-                    _dbLang = 1;
                     return;
                 }
                 string fullPron = System.IO.Path.Combine(pack, "ru_pron.tsv");
@@ -1994,178 +2154,8 @@ namespace RuWordList
                     Log.LogInfo("RUWordList: 例句库已自动重灌 FullEng.pron+sent=" + n1 +
                                 ", OnlyWord.pron=" + n2 + " (官方更新后恢复)");
                 }
-                _dbLang = 1;
             }
             catch (Exception e) { Warn("例句库自愈失败(下次启动再试): " + e.Message); }
-        }
-
-        // ---------------- 共享库 book-scoped 切换 ----------------
-        // 俄语词与英语词零重叠 (没有同形词): 俄语激活 = 注入 ru_*.tsv;
-        // 离开俄语书 = 把俄语 pron/sentence2 行整体删除, 恢复纯英语基线。
-        // 与法语/德语插件写同一组 .db, 但写入行集不相交;
-        // 事务 + busy_timeout=30000 保证并发安全。恢复即删除, 不需要英语基线 TSV。
-        private static readonly object DbWriteLock = new object();
-        private static volatile int _dbLang = 0;      // 0=unknown, 1=ru, 2=clean
-        private static volatile bool _dbSwitchBusy;
-        // 切换线程异常后的退避截止时间 (UtcNow.Ticks); 避免数据库被游戏
-        // 短暂占用时每秒重试刷日志。
-        private static long _dbSwitchFailUntilTicks;
-
-        private static void TickSharedDbSwitch()
-        {
-            if (!IsEnabled()) return;
-            if (!BookReady()) return;   // 未读档前不动共享库 (默认值态不可信)
-            if (_dbSwitchBusy) return;
-            if (DateTime.UtcNow.Ticks < _dbSwitchFailUntilTicks) return;
-            int want = (BookState() == 1) ? 1 : 2;
-            if (_dbLang == want) return;
-            if (want == 1 && _healDb != null && _healDb.Value && !_dbHealTried)
-                return; // 自愈开启时等 TickDbHeal 先跑 (它完成后置 _dbLang)
-            _dbSwitchBusy = true;
-            string pack = System.IO.Path.Combine(Application.persistentDataPath, DbPackDir);
-            string full = System.IO.Path.Combine(Application.streamingAssetsPath, "wcpFullEng.db");
-            string only = System.IO.Path.Combine(Application.streamingAssetsPath, "wcpOnlyWord.db");
-            System.Threading.Thread t = new System.Threading.Thread(new System.Threading.ThreadStart(delegate
-            {
-                try { lock (DbWriteLock) { SwitchSharedDb(pack, full, only, want); } }
-                catch (Exception e)
-                {
-                    _dbSwitchFailUntilTicks =
-                        DateTime.UtcNow.Ticks + 15 * TimeSpan.TicksPerSecond;
-                    Warn("共享库切换异常(15s 后重试): " + e.Message);
-                }
-                finally { _dbSwitchBusy = false; }
-            }));
-            t.IsBackground = true;
-            t.Start();
-        }
-
-        private static void SwitchSharedDb(string pack, string full, string only, int want)
-        {
-            string fullPron = System.IO.Path.Combine(pack, "ru_pron.tsv");
-            string fullSent = System.IO.Path.Combine(pack, "ru_sentences.tsv");
-            string onlyPron = System.IO.Path.Combine(pack, "ru_only_pron.tsv");
-            if (!System.IO.File.Exists(full))
-            {
-                _dbSwitchFailUntilTicks =
-                    DateTime.UtcNow.Ticks + 15 * TimeSpan.TicksPerSecond;
-                WarnOnce("switch-db-missing",
-                    "共享库切换需要 wcpFullEng.db, 缺失时 15s 后重试");
-                return;
-            }
-            // 探针词全部在 = 共享库处于俄语态 (NeedsDbHeal=false)
-            bool ruFull = !NeedsDbHeal(full);
-            if (want == 1)
-            {
-                if (ruFull)
-                {
-                    _dbLang = 1;
-                    InfoOnce("switch-ru-skip", "共享库已是俄语态, 无需切换");
-                    return;
-                }
-                if (!System.IO.File.Exists(fullPron) || !System.IO.File.Exists(fullSent) ||
-                    (System.IO.File.Exists(only) && !System.IO.File.Exists(onlyPron)))
-                {
-                    _dbSwitchFailUntilTicks =
-                        DateTime.UtcNow.Ticks + 60 * TimeSpan.TicksPerSecond;
-                    WarnOnce("switch-ru-missing",
-                        "共享库切换(俄语)缺少 ru_*.tsv, 60s 后重试");
-                    return;
-                }
-                BackupSharedDb(pack, full, only);
-                int n1 = ApplyDbPack(full, fullPron, fullSent);
-                int n2 = 0;
-                if (System.IO.File.Exists(only)) n2 = ApplyDbPack(only, onlyPron, null);
-                _dbLang = 1;
-                if (Log != null)
-                    Log.LogInfo("RUWordList: 共享库 -> 俄语 (FullEng=" + n1 +
-                                ", OnlyWord=" + n2 + ")");
-                return;
-            }
-            // want == 2: 离开俄语书, 删除全部俄语行 (与英语零重叠, 恢复即删除)
-            bool needFull = ruFull;
-            bool needOnly = OnlyHasRuRows(only);
-            if (!needFull && !needOnly) { _dbLang = 2; return; }
-            if (!System.IO.File.Exists(fullPron))
-            {
-                _dbSwitchFailUntilTicks =
-                    DateTime.UtcNow.Ticks + 60 * TimeSpan.TicksPerSecond;
-                WarnOnce("switch-clean-missing",
-                    "俄语行清理需要 ru_pron.tsv 提供词表, 60s 后重试");
-                return;
-            }
-            string[][] pronRows = ReadTsv(fullPron, 4);
-            string[][] sentRows = System.IO.File.Exists(fullSent)
-                ? ReadTsv(fullSent, 2) : new string[0][];
-            if (needFull)
-            {
-                BackupSharedDb(pack, full, only);
-                DeleteWordsFromDb(full, pronRows, sentRows);
-            }
-            if (needOnly && System.IO.File.Exists(only))
-            {
-                string[][] onlyRows = System.IO.File.Exists(onlyPron)
-                    ? ReadTsv(onlyPron, 4) : pronRows;
-                if (!needFull) BackupSharedDb(pack, null, only);
-                DeleteWordsFromDb(only, onlyRows, null);
-            }
-            _dbLang = 2;
-            if (Log != null)
-                Log.LogInfo("RUWordList: 共享库 -> 纯英语态 (俄语 pron/sentence2 行已清除)");
-        }
-
-        // OnlyWord 里只要还有一个俄语探针词, 就说明自愈曾把 ru_only_pron 灌进去,
-        // 离开俄语书时需要清理。动态探测而不是会话内一次性标记, 这样
-        // "切走 -> 切回(自愈重灌) -> 再切走" 也能正确清理第二次。
-        private static bool OnlyHasRuRows(string only)
-        {
-            if (!System.IO.File.Exists(only)) return false;
-            using (SqliteConnection con = new SqliteConnection("URI=file:" + only))
-            {
-                con.Open();
-                using (SqliteCommand cmd = con.CreateCommand())
-                {
-                    cmd.CommandText = "SELECT COUNT(*) FROM pron WHERE word = @w";
-                    cmd.Parameters.Add(new SqliteParameter("@w", DbProbes[0]));
-                    object o = cmd.ExecuteScalar();
-                    return o != null && Convert.ToInt64(o) > 0;
-                }
-            }
-        }
-
-        private static void BackupSharedDb(string pack, string full, string only)
-        {
-            string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            string bakDir = System.IO.Path.Combine(pack, "backup");
-            System.IO.Directory.CreateDirectory(bakDir);
-            if (full != null && System.IO.File.Exists(full))
-                System.IO.File.Copy(full,
-                    System.IO.Path.Combine(bakDir, "wcpFullEng.db.bak_" + stamp), true);
-            if (only != null && System.IO.File.Exists(only))
-                System.IO.File.Copy(only,
-                    System.IO.Path.Combine(bakDir, "wcpOnlyWord.db.bak_" + stamp), true);
-        }
-
-        private static void DeleteWordsFromDb(string db, string[][] pronRows, string[][] sentRows)
-        {
-            if (pronRows == null || pronRows.Length == 0) return;
-            using (SqliteConnection con = new SqliteConnection("URI=file:" + db))
-            {
-                con.Open();
-                using (SqliteCommand p = con.CreateCommand())
-                {
-                    p.CommandText = "PRAGMA busy_timeout=30000";
-                    p.ExecuteNonQuery();
-                }
-                using (SqliteTransaction tx = con.BeginTransaction())
-                {
-                    DeleteRows(con, tx, "pron", pronRows);
-                    if (sentRows != null && sentRows.Length > 0)
-                        DeleteRows(con, tx, "sentence2", sentRows);
-                    tx.Commit();
-                }
-                con.Close();
-            }
         }
 
         private static bool NeedsDbHeal(string db)
