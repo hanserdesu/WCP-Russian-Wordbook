@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""批量生成俄语单词发音 MP3 -> 游戏 vocabulary 目录。
+"""批量生成俄语单词发音 MP3 -> 游戏 wcp/ru_word_audio 私有目录。
 
-游戏按 `%USERPROFILE%\\AppData\\LocalLow\\WCP\\vocabulary\\<word>.mp3` 查找
-本地音频, 找不到才回退内置(英语向)TTS; 俄语词必须本地生成。
+RuWordListMod 只从 `%USERPROFILE%\\AppData\\LocalLow\\WCP\\wcp\\ru_word_audio`
+读取；不写入游戏原生共享 vocabulary，避免同形词污染其它语言。
 断点续传(manifest) + 并发限流 + 失败重试。
 用法: python tools/gen_word_audio.py [--limit N] [--retry-failed]
 """
@@ -20,7 +20,7 @@ import edge_tts
 
 sys.stdout.reconfigure(encoding='utf-8')
 ROOT = Path(__file__).resolve().parent.parent
-VOCAB_DIR = Path.home() / 'AppData' / 'LocalLow' / 'WCP' / 'vocabulary'
+VOCAB_DIR = Path.home() / 'AppData' / 'LocalLow' / 'WCP' / 'wcp' / 'ru_word_audio'
 MANIFEST = ROOT / 'output' / 'audio_manifest_ru.json'
 
 VOICE = 'ru-RU-SvetlanaNeural'

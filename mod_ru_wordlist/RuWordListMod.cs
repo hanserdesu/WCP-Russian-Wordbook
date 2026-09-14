@@ -7,8 +7,8 @@
 //   D) 自选测试(自由选择)的选词界面 (MyParameters.S9CurrentArray_Para, S9extraStudy_Para) 严格过滤非俄语词。
 //   E) 跨词书启动守卫与基线还原 (RuWL_*)：记录接管字段与原始基线，切换词书时安全还原，绝不污染英语或其它词书。
 //   F) 查词面板与音标对齐 (DatabaseManagerS8 / S8checkWordMeaning / ButtonTextTransfer / showTheAnswerS8)。
-//   G) 单词发音优先走本地 mp3，防回退内置英文 TTS。
-//   H) 离线自愈机制：官方更新覆盖 StreamingAssets 下的 .db 后，后台自动检测探测词并从 ru_db_payload 重灌还原。
+//   G) 单词发音只走俄语私有 mp3，防回退共享 vocabulary 或内置英文 TTS。
+//   H) 旧版共享数据库自愈仅保留为显式兼容选项，默认关闭；新资源包必须提供自己的数据库资源。
 //   I) 每日学习/复习队列与日语复刻版同样覆盖原生 Reset/刷新入口；检测总表、剩余表、已完成表
 //      不一致时自动恢复，避免只剩少量残留词就被 CompleteIf 标记为完成。
 
@@ -40,6 +40,7 @@ namespace RuWordList
         private static ConfigEntry<bool> _topUp;
         private static ConfigEntry<bool> _guardOtherLists;
         private static ConfigEntry<bool> _healDb;
+        private static ConfigEntry<bool> _allowLegacySharedDbWrites;
         private static readonly HashSet<string> Warned = new HashSet<string>();
         private static readonly Dictionary<string, string> LastSig = new Dictionary<string, string>();
 
@@ -141,7 +142,9 @@ namespace RuWordList
             _guardOtherLists = Config.Bind("General", "GuardOtherLists", true,
                 "接管测试与复习队列，过滤跨词书残留词条。");
             _healDb = Config.Bind("General", "HealExampleDatabase", true,
-                "若官方更新覆盖 StreamingAssets 下的 .db，在后台自动重灌俄语补丁。");
+                "旧版兼容开关；只有同时启用 Legacy/AllowSharedDatabaseWrites 才会生效。");
+            _allowLegacySharedDbWrites = Config.Bind("Legacy", "AllowSharedDatabaseWrites", false,
+                "允许旧版俄语补丁写入游戏共享 wcpFullEng.db/wcpOnlyWord.db。默认关闭以保持语言资源隔离。");
 
             PatchAll();
         }
@@ -861,28 +864,39 @@ namespace RuWordList
             List<string> book = MyParameters.ChosenBook_List;
             if (fr && book != null)
             {
-                if (preferLearned)
-                {
-                    FillFromLearned(dest, seen, fr, bookSet, target);
-                    FillFromList(dest, seen, book, target);
-                }
-                else
-                {
-                    Dictionary<string, WordInfo> learned = MyParameters.HaveLearnedDictionary;
-                    for (int i = 0; i < book.Count && dest.Count < target; i++)
-                    {
-                        string w = book[i];
-                        if (string.IsNullOrEmpty(w)) continue;
-                        if (learned != null && learned.ContainsKey(w)) continue;
-                        if (seen.Add(w)) dest.Add(w);
-                    }
-                    FillFromList(dest, seen, book, target);
-                    FillFromLearned(dest, seen, fr, bookSet, target);
-                }
+                // 词池只能从当前词书补齐；全局 HaveLearnedDictionary 不能跨书供词。
+                FillFromBookProgress(dest, seen, book, preferLearned, target);
             }
             else
             {
-                FillFromLearned(dest, seen, fr, bookSet, target);
+                FillFromList(dest, seen, book, target);
+            }
+        }
+
+        private static void FillFromBookProgress(List<string> dest, HashSet<string> seen,
+            List<string> book, bool preferLearned, int target)
+        {
+            if (book == null) return;
+            Dictionary<string, WordInfo> learned = MyParameters.HaveLearnedDictionary;
+            List<string> learnedBook = new List<string>();
+            List<string> unlearnedBook = new List<string>();
+            for (int i = 0; i < book.Count; i++)
+            {
+                string w = book[i];
+                if (string.IsNullOrEmpty(w) || seen.Contains(w)) continue;
+                if (learned != null && learned.ContainsKey(w)) learnedBook.Add(w);
+                else unlearnedBook.Add(w);
+            }
+            if (preferLearned)
+            {
+                OrderByTestSetting(learnedBook, learned);
+                FillFromList(dest, seen, learnedBook, target);
+                FillFromList(dest, seen, unlearnedBook, target);
+            }
+            else
+            {
+                FillFromList(dest, seen, unlearnedBook, target);
+                FillFromList(dest, seen, learnedBook, target);
             }
         }
 
@@ -1269,19 +1283,6 @@ namespace RuWordList
                 return false;
             string file = System.IO.Path.Combine(Application.persistentDataPath,
                 "ru_word_audio", word + ".mp3");
-            if (!System.IO.File.Exists(file))
-            {
-                file = System.IO.Path.Combine(Application.persistentDataPath,
-                    "vocabulary", word + ".mp3");
-            }
-            if (!System.IO.File.Exists(file))
-            {
-                string parentDir = System.IO.Path.GetDirectoryName(Application.persistentDataPath);
-                if (!string.IsNullOrEmpty(parentDir))
-                {
-                    file = System.IO.Path.Combine(parentDir, "vocabulary", word + ".mp3");
-                }
-            }
             Instance.StopWordAudio();
             if (!System.IO.File.Exists(file))
             {
@@ -1390,20 +1391,27 @@ namespace RuWordList
         {
             try
             {
-                if (!BookReady()) return false;
+                // BookReady deliberately blocks writes while the game is
+                // loading.  The cross-book guard must still see the persisted
+                // target during that window, otherwise the old plugin can win
+                // one last write before MyParameters catches up.
+                string diskName = DiskBookName();
+                int diskIdx = SelfBookIndexOf(diskName);
+                if (diskIdx > 0 && IsOtherManagedProfile(SlotProfile(diskIdx)))
+                    return true;
+
                 string name = MyParameters.ChosenBook_Para;
                 if (string.IsNullOrEmpty(name)) return false;
-                List<string> book = MyParameters.ChosenBook_List;
-                if (book == null || book.Count < 5) return false;
-                BookProfile memoryProfile = BookProfiles.Match(book);
-                if (memoryProfile == null || memoryProfile.Language == BookProfiles.Russian)
-                    return false;
                 int idx = SelfBookIndexOf(name);
                 if (idx <= 0) return false;
-                BookProfile slotProfile = SlotProfile(idx);
-                return slotProfile != null && slotProfile.Id == memoryProfile.Id;
+                return IsOtherManagedProfile(SlotProfile(idx));
             }
             catch (Exception) { return false; }
+        }
+
+        private static bool IsOtherManagedProfile(BookProfile profile)
+        {
+            return profile != null && profile.Language != BookProfiles.Russian;
         }
 
         private static bool OtherRestoreDeferred()
@@ -2078,7 +2086,7 @@ namespace RuWordList
             if (LastSig.TryGetValue(key, out prev) && prev == sig) return;
             LastSig[key] = sig;
             Log.LogInfo("RUWordList: " + key + " -> " + count + " 词 (示例: " + sample + ") @" +
-                (RussianBookSelected() ? "fr" : "other"));
+                (RussianBookSelected() ? BookProfiles.Russian : "other"));
         }
 
         internal static bool RussianBookSelected()
@@ -2096,7 +2104,11 @@ namespace RuWordList
 
         private static void TickDbHeal()
         {
-            if (_dbHealTried || _healDb == null || !_healDb.Value) return;
+            // The old repair path mutates the game's language-global databases.
+            // Keep it available only for an explicit legacy migration; normal
+            // resource packs must never write another language's database.
+            if (_dbHealTried || _healDb == null || !_healDb.Value ||
+                _allowLegacySharedDbWrites == null || !_allowLegacySharedDbWrites.Value) return;
             if (BookState() != 1) return;
             if (_dbHealAt < 0f) { _dbHealAt = Time.unscaledTime + 8f; return; }
             if (Time.unscaledTime < _dbHealAt) return;

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""批量生成俄语例句语音 -> 游戏 persistentDataPath/sentence_audio/<md5(ru)>.mp3
+"""批量生成俄语例句语音 -> 游戏 persistentDataPath/ru_sentence_audio/<md5(ru)>.mp3
 
 数据源: data/translations/sentences_master.json {word: [[ru, zh], ...]}
 文件名: md5(ru.encode('utf-8')).hexdigest() — 与 BepInEx 插件
@@ -22,7 +22,7 @@ import edge_tts
 ROOT = Path(__file__).resolve().parent.parent
 MASTER = ROOT / 'data' / 'translations' / 'sentences_master.json'
 OUT_DIR = Path(os.path.expandvars(
-    r'%USERPROFILE%\AppData\LocalLow\WCP\wcp\sentence_audio'))
+    r'%USERPROFILE%\AppData\LocalLow\WCP\wcp\ru_sentence_audio'))
 VOICE = 'ru-RU-SvetlanaNeural'
 CONCURRENCY = 12
 

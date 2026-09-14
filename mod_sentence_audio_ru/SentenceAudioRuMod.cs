@@ -1,7 +1,7 @@
 // WCP Sentence Audio RU — BepInEx 5 插件 (俄语变体, 基于 mod_sentence_audio_fr 法语版)
 // 功能: 在 每日学习(DatabaseManagerS8) 与 词典查询(DatabaseManagerS17) 的
-// 例句旁挂 ▶ 按钮, 点击播放 sentence_audio/<md5(ru)>.mp3 (由
-// D:/Russian/tools/gen_sentence_audio_ru.py 生成, 文件名规则两端一致)。
+// 例句旁挂 ▶ 按钮, 点击播放 ru_sentence_audio/<md5(ru)>.mp3 (由
+// D:/ATooManyLanguage/Russian/tools/gen_sentence_audio_ru.py 生成, 文件名规则两端一致)。
 //
 // 与日语版 (SentenceAudioMod) / 法语版 (SentenceAudioFrMod) 的互斥设计:
 //   - ExtractRu 只接受「含西里尔字母 且 不含拉丁字母/CJK/假名」的文本 ——
@@ -27,6 +27,7 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.UI;
+using WcpBookProfiles;
 
 namespace SentenceAudioRu
 {
@@ -34,8 +35,9 @@ namespace SentenceAudioRu
     public class RuSentenceAudioPlugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
+        internal static RuSentenceAudioPlugin Instance;
         private const float ScanInterval = 0.3f;
-        private const string AudioDirName = "sentence_audio";
+        private const string AudioDirName = "ru_sentence_audio";
 
         private AudioSource _audio;
         private ConfigEntry<bool> _enabled;
@@ -54,9 +56,78 @@ namespace SentenceAudioRu
         private readonly Dictionary<TMP_Text, GameObject> _buttons =
             new Dictionary<TMP_Text, GameObject>();
 
+        // 例句按钮是游戏所有词书共用的 UI。只有当前内存词表、当前自定义槽和
+        // 已落盘的书名三者一致地指向已登记俄语 Profile 时，才允许接管它。
+        // 任何读档/切书中的不一致都失败关闭，宁可暂时不显示俄语按钮，也不碰别的词书。
+        private bool ManagedRussianBookSelected()
+        {
+            try
+            {
+                string name = MyParameters.ChosenBook_Para;
+                if (string.IsNullOrEmpty(name)) return false;
+                int slot = SlotOf(name);
+                if (slot <= 0) return false;
+                string disk = ES3.Load<string>("ChosenBook_Para", defaultValue: null);
+                if (string.IsNullOrEmpty(disk) || disk != name) return false;
+                List<string> current = MyParameters.ChosenBook_List;
+                BookProfile memory = BookProfiles.Match(current);
+                if (memory == null || memory.Language != BookProfiles.Russian) return false;
+                string path = Path.Combine(Application.persistentDataPath, "MyBook.es3");
+                string[] slotWords = ES3.Load<string[]>("SelfBookList" + slot, path);
+                BookProfile stored = BookProfiles.Match(slotWords);
+                return stored != null && stored.Id == memory.Id;
+            }
+            catch (Exception) { return false; }
+        }
+
+        private static int SlotOf(string name)
+        {
+            if (string.IsNullOrEmpty(name) || !name.StartsWith("自定义词书",
+                StringComparison.Ordinal)) return 0;
+            for (int i = 0; i < name.Length; i++)
+            {
+                char c = name[i];
+                if (c == '一') return 1;
+                if (c == '二') return 2;
+                if (c == '三') return 3;
+                if (c == '四') return 4;
+                if (c >= '1' && c <= '4') return c - '0';
+            }
+            return 0;
+        }
+
+        // 切到其它语言词书时, 还原之前修改过的原版"读例句"按钮
+        private void RestoreOtherBookUi()
+        {
+            if (_readStates.Count > 0)
+            {
+                foreach (KeyValuePair<Button, RuReadBtnState> pair in _readStates)
+                {
+                    Button b = pair.Key;
+                    RuReadBtnState st = pair.Value;
+                    if (b == null || st == null) continue;
+                    b.onClick.RemoveAllListeners();
+                    st.actionAttached = false;
+                    foreach (KeyValuePair<TMP_Text, string> label in st.labels)
+                    {
+                        if (label.Key != null) label.Key.text = label.Value;
+                    }
+                    RuReadTag tag = b.GetComponent<RuReadTag>();
+                    if (tag != null) UnityEngine.Object.Destroy(tag);
+                }
+                _readStates.Clear();
+            }
+            _gameButtonsActive = false;
+            foreach (KeyValuePair<TMP_Text, GameObject> pair in _buttons)
+            {
+                if (pair.Value != null && pair.Value.activeSelf) pair.Value.SetActive(false);
+            }
+        }
+
         void Awake()
         {
             Log = Logger;
+            Instance = this;
             PatchSoundTheWord();
             var go = new GameObject("SentenceAudioRuPlayer");
             UnityEngine.Object.DontDestroyOnLoad(go);
@@ -105,6 +176,11 @@ namespace SentenceAudioRu
             }
             if (_s8 == null && _t8 != null) _s8 = FindObjectOfType(_t8);
             if (_s17 == null && _t17 != null) _s17 = FindObjectOfType(_t17);
+            if (!ManagedRussianBookSelected())
+            {
+                RestoreOtherBookUi();
+                return;
+            }
             if (_s8 == null && _s17 == null) return;
             if (_f8 == null && _f17 == null) return;
 
@@ -179,6 +255,7 @@ namespace SentenceAudioRu
                         SuppressWordTts(b);
                         b.onClick.RemoveAllListeners();
                         b.onClick.AddListener(st.action);
+                        st.actionAttached = true;
                         EnsurePreloaded(file);
                         if (isNew) Relabel(b, i);
                         if (changed)
@@ -238,6 +315,8 @@ namespace SentenceAudioRu
         // 标签 "读例句N" -> "RU", 其余文字(如快捷键号)保留
         private void Relabel(Button b, int i)
         {
+            RuReadBtnState state;
+            if (!_readStates.TryGetValue(b, out state) || state == null) return;
             var texts = b.GetComponentsInChildren<TMP_Text>(true);
             for (int j = 0; j < texts.Length; j++)
             {
@@ -245,13 +324,14 @@ namespace SentenceAudioRu
                 if (string.IsNullOrEmpty(s)) continue;
                 if (s.IndexOf("读例句", StringComparison.Ordinal) >= 0)
                 {
+                    if (!state.labels.ContainsKey(texts[j])) state.labels[texts[j]] = s;
                     texts[j].text = s.Replace("读例句", "RU");
                     Diag("relabel " + i + ": '" + s + "' -> '" + texts[j].text + "'");
                 }
             }
         }
 
-        // 例句按钮上挂着游戏的 SoundTheWordS8, 点一下会去触发单词的英文 TTS。
+        // 例句按钮上挂着游戏的 SoundTheWordS8: 点一下会去触发单词的英文 TTS。
         // 用反射按名字取类型 (不编译期引用游戏类)。
         private void PatchSoundTheWord()
         {
@@ -281,17 +361,27 @@ namespace SentenceAudioRu
             }
         }
 
+        private bool IsActivelyTakingOver(Button button)
+        {
+            if (button == null || _enabled == null || !_enabled.Value) return false;
+            if (!ManagedRussianBookSelected()) return false;
+            RuReadBtnState state;
+            return _readStates.TryGetValue(button, out state) &&
+                state != null && state.actionAttached;
+        }
+
         private static bool SoundTheWordPrefix(object __instance)
         {
             try
             {
                 if (__instance == null) return true;
+                if (Instance != null && !Instance.ManagedRussianBookSelected()) return true;
                 var f = __instance.GetType().GetField("button1",
                     BindingFlags.Public | BindingFlags.NonPublic |
                     BindingFlags.Instance);
                 if (f == null) return true;
                 var b = f.GetValue(__instance) as Button;
-                if (b != null && b.GetComponent<RuReadTag>() != null)
+                if (b != null && Instance != null && Instance.IsActivelyTakingOver(b))
                 {
                     Diag("blocked english TTS on " + b.name);
                     return false;   // 我们接管的例句按钮: 不触发英文发音
@@ -535,11 +625,13 @@ namespace SentenceAudioRu
             if (s.Length == 0) return null;
             int nl = s.IndexOf('\n');
             if (nl >= 0) s = s.Substring(0, nl).Trim();
-            if (s.EndsWith("）"))
+            if (s.EndsWith("）") || s.EndsWith(")"))
             {
                 int i = s.LastIndexOf('（');
+                if (i < 0) i = s.LastIndexOf('(');
                 if (i > 0) s = s.Substring(0, i).Trim();
             }
+            s = s.TrimEnd('。', ' ');
             if (s.Length < 2) return null;
             bool hasCyr = false;
             for (int i = 0; i < s.Length; i++)
@@ -615,6 +707,8 @@ namespace SentenceAudioRu
         public RuSentenceAudioPlugin owner;
         public string file;
         public UnityEngine.Events.UnityAction action;
+        public bool actionAttached;
+        public readonly Dictionary<TMP_Text, string> labels = new Dictionary<TMP_Text, string>();
 
         public void Play()
         {
