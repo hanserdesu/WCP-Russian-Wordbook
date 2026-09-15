@@ -9,3 +9,6 @@ __pycache__/
 
 # 安装器打包产物（体积大，由 tools/generate_installer_ru.py 现场生成）
 output/installer_pkg/
+
+# 会话工作痕迹，不入库
+.zcode/
