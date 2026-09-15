@@ -28,7 +28,7 @@ using WcpBookProfiles;
 
 namespace RuWordList
 {
-    [BepInPlugin("dev.hanserdesu.ruwordlist", "WCP RU Word List", "1.1.0")]
+    [BepInPlugin("dev.hanserdesu.ruwordlist", "WCP RU Word List", "1.2.0")]
     public class RuWordListPlugin : BaseUnityPlugin
     {
         internal const string ReviewRangeType = "复习范围词";
@@ -42,6 +42,7 @@ namespace RuWordList
         private static ConfigEntry<bool> _healDb;
         private static ConfigEntry<bool> _allowLegacySharedDbWrites;
         private static readonly HashSet<string> Warned = new HashSet<string>();
+        private static ConfigEntry<bool> _yieldToHost;
         private static readonly Dictionary<string, string> LastSig = new Dictionary<string, string>();
 
         // 存档里的词书名缓存 (判断游戏是否已经读档)
@@ -146,9 +147,43 @@ namespace RuWordList
             _allowLegacySharedDbWrites = Config.Bind("Legacy", "AllowSharedDatabaseWrites", false,
                 "允许旧版俄语补丁写入游戏共享 wcpFullEng.db/wcpOnlyWord.db。默认关闭以保持语言资源隔离。");
 
+            _yieldToHost = Config.Bind("Legacy", "YieldToHost", true,
+                "宿主 WcpHost 接管本语言后, 旧词表插件自动让位(只保留语言资源)。设 false 强制以旧模式运行。");
+            if (HostTakesOver())
+            {
+                Log.LogWarning("RUWordList: WcpHost 已接管俄语, 旧词表插件不再打补丁 (Legacy/YieldToHost=false 可强制旧模式)。");
+                return;
+            }
             PatchAll();
         }
 
+        // 语言资源隔离: 宿主 (WcpHost) 成功接管本语言后, 运行时补丁只能有一个所有者。
+        // 两个插件争抢同一批补丁时"后写者胜", 上一本书的词会串进新书 —— 这就是
+        // "俄语切日语后还出俄语"的成因。判定看宿主落盘的受管语言登记
+        // (<BepInEx>/config/WcpHost.managed.txt), 而不是"文件是否存在":
+        // 宿主没装或没接管本语言时, 本插件照旧按旧模式工作。
+        private static bool HostTakesOver()
+        {
+            try
+            {
+                if (_yieldToHost == null || !_yieldToHost.Value) return false;
+                string dir = Paths.ConfigPath;
+                if (string.IsNullOrEmpty(dir)) return false;
+                string marker = System.IO.Path.Combine(dir, "WcpHost.managed.txt");
+                if (!System.IO.File.Exists(marker)) return false;
+                string[] codes = System.IO.File.ReadAllLines(marker);
+                for (int i = 0; i < codes.Length; i++)
+                    if (string.Equals(codes[i].Trim(), PackLangCode, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                return false;
+            }
+            catch (Exception e)
+            {
+                // 判定失败保持旧行为: 宿主不存在才是常态, 不能因为读不到文件就停摆。
+                Log.LogWarning("ru RUWordList: 宿主接管判定失败, 按旧模式继续打补丁: " + e.Message);
+                return false;
+            }
+        }
         private void PatchAll()
         {
             Harmony harmony = new Harmony("dev.hanserdesu.ruwordlist");
@@ -2098,6 +2133,9 @@ namespace RuWordList
         // 官方更新会覆盖 StreamingAssets 下的 .db, 把俄语词条的释义(pron)和例句(sentence2)冲掉。
         // 启动后若发现探针词缺失, 就从 LocalLow 的补丁包(ru_db_payload)重灌一次; 写前先备份 DB。
         private const string DbPackDir = "ru_db_payload";
+
+        // 宿主资源包的语言代码: packs/<PackLangCode>/manifest.json
+        private const string PackLangCode = "ru";
         private static readonly string[] DbProbes = new string[] { "стол", "человек", "хорошо", "говорить" };
         private static bool _dbHealTried;
         private static float _dbHealAt = -1f;
