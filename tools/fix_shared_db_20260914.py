@@ -9,7 +9,7 @@ import time
 
 GAME = r"E:\Steam\steamapps\common\WCP-WordGirlgriend"
 SA = GAME + r"\wcp_Data\StreamingAssets"
-PACK = r"D:\Russian\output\ru_db_payload"
+PACK = r"D:\ATooManyLanguage\Russian\output\ru_db_payload"
 BACKUP = PACK + r"\backup"
 
 

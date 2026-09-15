@@ -13,7 +13,9 @@
 """
 import argparse
 import json
+import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -24,6 +26,19 @@ OUT = ROOT / 'output'
 
 MYBOOK = Path.home() / 'AppData' / 'LocalLow' / 'WCP' / 'wcp' / 'MyBook.es3'
 BACKUP_DIR = MYBOOK.parent / 'MyBook_backups'
+
+def game_running():
+    tasklist = 'tasklist'
+    sys32 = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'tasklist.exe'
+    if sys32.exists():
+        tasklist = str(sys32)
+    try:
+        r = subprocess.run([tasklist, '/FI', 'IMAGENAME eq wcp.exe'],
+                           capture_output=True, text=True, encoding='gbk',
+                           errors='replace')
+        return 'wcp.exe' in (r.stdout or '').lower()
+    except Exception:
+        return False
 
 ARR_TYPE = 'System.String[],mscorlib'
 DICT_TYPE = ('System.Collections.Generic.Dictionary`2[[System.String, mscorlib, '
@@ -56,6 +71,9 @@ def build_slot(words):
 
 
 def main():
+    if game_running():
+        print('wcp.exe 正在运行，请先关闭游戏后再写入 MyBook.es3')
+        sys.exit(1)
     ap = argparse.ArgumentParser()
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--file', default=str(MYBOOK))

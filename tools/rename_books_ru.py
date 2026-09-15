@@ -9,6 +9,7 @@
   python tools/rename_books_ru.py --restore  # 还原槽位3/4为默认
 """
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -27,10 +28,17 @@ DEFAULT = {'SelfBookName3': '空槽位', 'SelfBookName4': '空槽位'}
 
 
 def game_running():
-    r = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq wcp.exe'],
-                       capture_output=True, text=True, encoding='gbk',
-                       errors='replace')
-    return 'wcp.exe' in (r.stdout or '')
+    tasklist = 'tasklist'
+    sys32 = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'tasklist.exe'
+    if sys32.exists():
+        tasklist = str(sys32)
+    try:
+        r = subprocess.run([tasklist, '/FI', 'IMAGENAME eq wcp.exe'],
+                           capture_output=True, text=True, encoding='gbk',
+                           errors='replace')
+        return 'wcp.exe' in (r.stdout or '').lower()
+    except Exception:
+        return False
 
 
 def main():

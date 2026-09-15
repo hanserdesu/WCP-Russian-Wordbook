@@ -9,6 +9,7 @@
   - C列以后被忽略, 可放重音/释义原文/例句等人工参考信息
 """
 import json
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -87,6 +88,13 @@ def main():
     con.commit()
     con.close()
     print(f'{db_path.name}: pron {len(seen)} 词 (去重), russian_all {len(all_rows)} 行')
+
+    # 同步复制到 persistentDataPath
+    dest = Path.home() / 'AppData' / 'LocalLow' / 'WCP' / 'wcp'
+    if dest.exists():
+        for f in IMPORT.glob('*'):
+            shutil.copy2(f, dest / f.name)
+        print(f'已同步导入文件到 {dest}')
 
 
 if __name__ == '__main__':
